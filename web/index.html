@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>אמולטור מובידוס</title>
+<!-- הדף שמוגש מהאמולטור בדפדפן (tools/emulator/start_web_emulator.sh): מסך המכשיר דרך noVNC,
+     ומתחתיו מקשי מכשיר-מקשים. כל המקשים עוברים באותו חיבור VNC — הכפתורים שולחים את אותם מקשים
+     שהמקלדת שולחת ('-' = כוכבית, '=' = סולמית, Esc = חזור, Ctrl+H = בית, Ctrl+M = תפריט).
+     הסיסמה: מהחלק שאחרי '#' בכתובת (#pw=..., הדפדפן לא שולח אותו לשרת), אחרת מה שנשמר בדפדפן הזה,
+     אחרת הדף שואל. ב-VNC רק 8 התווים הראשונים של הסיסמה נחשבים. -->
+<style>
+  :root { --bg: #f4f6f9; --fg: #1b1f24; --muted: #5d6673; --key: #ffffff; --key-border: #d3d9e2; --accent: #1565c0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15181c; --fg: #e8eaed; --muted: #9aa3ad; --key: #23272d; --key-border: #3a4048; --accent: #64a8f0; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, "Segoe UI", Arial, sans-serif;
+         display: flex; flex-direction: column; align-items: center; }
+  #bar { width: 100%; max-width: 520px; padding: 6px 12px; display: flex; justify-content: space-between; gap: 8px; color: var(--muted); }
+  #status.ok { color: #2e7d32; } #status.bad { color: #c62828; }
+  #screen { flex: 1 1 auto; width: 100%; min-height: 200px; display: flex; justify-content: center; }
+  #keys { width: 100%; max-width: 420px; padding: 8px 12px 4px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+  button { font: inherit; font-size: 15px; padding: 9px 0; border-radius: 10px; border: 1px solid var(--key-border);
+           background: var(--key); color: var(--fg); cursor: pointer; touch-action: manipulation; }
+  button:active { background: var(--accent); color: #fff; }
+  .wide { grid-column: span 2; }
+  #help { max-width: 520px; padding: 4px 12px 10px; color: var(--muted); font-size: 12px; text-align: center; }
+  kbd { font-family: inherit; border: 1px solid var(--key-border); border-radius: 4px; padding: 0 4px; }
+</style>
+</head>
+<body>
+<div id="bar"><span>אמולטור אנדרואיד 4.4</span><span id="status">מתחבר…</span></div>
+<div id="screen"></div>
+<div id="keys">
+  <button data-k="back">חזור</button>
+  <button data-k="up">▲</button>
+  <button data-k="home">בית</button>
+  <button data-k="star">*</button>
+  <button data-k="pound">#</button>
+  <button data-k="right">▶</button>
+  <button data-k="ok">OK</button>
+  <button data-k="left">◀</button>
+  <button data-k="menu" class="wide">תפריט</button>
+  <span></span>
+  <button data-k="down">▼</button>
+</div>
+<div id="help">
+  במקלדת: חצים, <kbd>Enter</kbd> וספרות כמו במכשיר מקשים · <kbd>-</kbd> כוכבית · <kbd>=</kbd> סולמית ·
+  <kbd>Esc</kbd> חזור · <kbd>Ctrl</kbd>+<kbd>H</kbd> בית · <kbd>Ctrl</kbd>+<kbd>M</kbd> תפריט.
+  לחצו על המסך לפני הקלדה. כתיבה בעברית — מקלדת אנגלית במחשב לא תכתוב עברית באנדרואיד.
+</div>
+<script type="module">
+  import RFB from './core/rfb.js';
+
+  const KS = { Up: 0xff52, Down: 0xff54, Left: 0xff51, Right: 0xff53, Return: 0xff0d, Ctrl: 0xffe3,
+               Escape: 0xff1b, h: 0x68, m: 0x6d, minus: 0x2d, equal: 0x3d };
+  const KEYS = {
+    up: [KS.Up], down: [KS.Down], left: [KS.Left], right: [KS.Right], ok: [KS.Return],
+    star: [KS.minus], pound: [KS.equal],
+    back: [KS.Escape], home: [KS.Ctrl, KS.h], menu: [KS.Ctrl, KS.m],
+  };
+
+  const STORE = 'emulator-pw';
+  function stored() { try { return localStorage.getItem(STORE) || ''; } catch (e) { return ''; } }
+  function remember(v) { try { localStorage.setItem(STORE, v); } catch (e) {} }
+  function forget() { try { localStorage.removeItem(STORE); } catch (e) {} }
+  let pw = new URLSearchParams(location.hash.slice(1)).get('pw') || stored();
+  if (!pw) pw = prompt('סיסמת האמולטור') || '';
+  const status = document.getElementById('status');
+  const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/websockify';
+  let rfb = null;
+
+  function setStatus(text, cls) { status.textContent = text; status.className = cls || ''; }
+
+  function connect() {
+    rfb = new RFB(document.getElementById('screen'), url, { credentials: { password: pw } });
+    rfb.scaleViewport = true;
+    rfb.resizeSession = false;
+    rfb.addEventListener('connect', () => { setStatus('מחובר', 'ok'); remember(pw); rfb.focus(); });
+    let badPassword = false;
+    rfb.addEventListener('disconnect', (e) => {
+      if (badPassword) return;
+      setStatus(e.detail.clean ? 'מנותק — מתחבר שוב…' : 'ממתין לאמולטור…', 'bad');
+      setTimeout(connect, 3000);
+    });
+    rfb.addEventListener('credentialsrequired', () => {
+      pw = prompt('סיסמת האמולטור') || '';
+      rfb.sendCredentials({ password: pw });
+    });
+    rfb.addEventListener('securityfailure', () => {
+      badPassword = true;
+      forget();
+      setStatus('סיסמה שגויה', 'bad');
+      pw = prompt('סיסמה שגויה. סיסמת האמולטור:') || '';
+      if (pw) setTimeout(connect, 500);
+    });
+  }
+
+  function press(syms) {
+    if (!rfb) return;
+    for (const s of syms) rfb.sendKey(s, null, true);
+    for (const s of [...syms].reverse()) rfb.sendKey(s, null, false);
+    rfb.focus();
+  }
+
+  for (const b of document.querySelectorAll('#keys button')) {
+    b.addEventListener('click', () => press(KEYS[b.dataset.k]));
+  }
+  connect();
+</script>
+</body>
+</html>

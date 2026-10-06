@@ -1,0 +1,183 @@
+# אמולטור אנדרואיד בדפדפן: מכשיר Android 4.4 שרץ על שרת של GitHub, עם קישור שנפתח בכל דפדפן —
+# מסך המכשיר ומתחתיו מקשי מכשיר-מקשים. הקישור מופיע בשלב "🔗 הקישור לאמולטור" ובסיכום הריצה.
+# הסיסמה: הסוד EMULATOR_PASSWORD של המאגר (המאגר ציבורי, והלוגים שלו גלויים לכולם — לכן הסיסמה לא נכתבת בהם).
+name: אמולטור בדפדפן
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk:
+        description: 'מה להתקין: release = הגרסה האחרונה של מובידוס, url = קישור ל-APK, none = כלום'
+        type: choice
+        options:
+          - release
+          - url
+          - none
+        default: release
+      apk_url:
+        description: 'לבחירה url: קישור ישיר לקובץ APK'
+        type: string
+        default: ''
+      screen:
+        description: 'מסך המכשיר'
+        type: choice
+        options:
+          - '480x854 (240dpi)'
+          - '240x320 (120dpi)'
+          - '320x640 (160dpi)'
+          - '720x1280 (320dpi)'
+        default: '480x854 (240dpi)'
+      minutes:
+        description: 'כמה דקות להשאיר פתוח (עד 340; לעצירה מוקדמת: Cancel workflow)'
+        type: string
+        default: '60'
+
+permissions:
+  contents: read
+
+jobs:
+  emulator:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      APK_SOURCE: ${{ inputs.apk || 'release' }}
+      APK_URL: ${{ inputs.apk_url }}
+      SCREEN_CHOICE: ${{ inputs.screen || '480x854 (240dpi)' }}
+      MINUTES: ${{ inputs.minutes || '60' }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Enable KVM
+      run: |
+        echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+        sudo udevadm control --reload-rules
+        sudo udevadm trigger --name-match=kvm
+        ls -l /dev/kvm || echo "::warning::no /dev/kvm on this runner — the emulator will be slow"
+
+    - name: Install the screen-sharing tools
+      run: |
+        sudo apt-get update -qq
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb x11vnc novnc websockify x11-utils xdotool >/dev/null
+        curl -fsSL -o "$RUNNER_TEMP/cloudflared" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+        chmod +x "$RUNNER_TEMP/cloudflared"
+
+    - name: Password
+      id: pw
+      env:
+        SECRET_PW: ${{ secrets.EMULATOR_PASSWORD }}
+      run: |
+        if [ -n "$SECRET_PW" ]; then
+          echo "from_secret=1" >> "$GITHUB_OUTPUT"
+        else
+          # בלי סוד: סיסמה אקראית, והקישור (כולל הסיסמה) ייכתב בלוג — שבמאגר ציבורי גלוי לכולם.
+          echo "pw=$(openssl rand -hex 4)" >> "$GITHUB_OUTPUT"
+          echo "from_secret=0" >> "$GITHUB_OUTPUT"
+          echo "::warning::no EMULATOR_PASSWORD secret — the password is in the link in this public log. Settings → Secrets and variables → Actions → New repository secret."
+        fi
+
+    - name: Open the tunnel
+      id: tunnel
+      run: |
+        nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --url http://localhost:6080 > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+        URL=""
+        for _ in $(seq 1 60); do
+          URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -1 || true)
+          [ -n "$URL" ] && break
+          sleep 1
+        done
+        [ -n "$URL" ] || { cat "$RUNNER_TEMP/cloudflared.log"; echo "::error::the tunnel did not start"; exit 1; }
+        echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+    # השלב הזה מסתיים מיד, כדי שאפשר יהיה לפתוח אותו בלוג. הדף מנסה להתחבר בעצמו עד שהמכשיר מוכן.
+    - name: 🔗 הקישור לאמולטור
+      env:
+        URL: ${{ steps.tunnel.outputs.url }}
+        FROM_SECRET: ${{ steps.pw.outputs.from_secret }}
+        PW: ${{ steps.pw.outputs.pw }}
+      run: |
+        if [ "$FROM_SECRET" = "1" ]; then LINK="$URL/"; NOTE="הסיסמה: הסוד EMULATOR_PASSWORD (הדף ישאל בפעם הראשונה ויזכור)."
+        else LINK="$URL/#pw=$PW"; NOTE="הסיסמה בתוך הקישור."; fi
+        echo "::notice title=הקישור לאמולטור::$LINK"
+        echo ""
+        echo "=========================================================================="
+        echo "  $LINK"
+        echo "=========================================================================="
+        echo "$NOTE"
+        echo "המכשיר עולה תוך 1–3 דקות; הדף מתחבר בעצמו כשהוא מוכן."
+        { echo "### 🔗 [פתיחת האמולטור]($LINK)"; echo ""; echo "$NOTE"; } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Install the emulator and Android 4.4
+      run: |
+        SDKM="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+        yes | "$SDKM" --licenses >/dev/null 2>&1 || true
+        "$SDKM" --install "emulator" "platform-tools" "system-images;android-19;default;x86" > "$RUNNER_TEMP/sdk.log" 2>&1 \
+          || { tail -30 "$RUNNER_TEMP/sdk.log"; exit 1; }
+
+    - name: Download the APK
+      run: |
+        mkdir -p "$RUNNER_TEMP/apk"
+        cd "$RUNNER_TEMP/apk"
+        case "$APK_SOURCE" in
+          release)
+            TAG=$(gh api 'repos/moovitdos/moovidos/releases?per_page=30' \
+              --jq '[.[] | select(.draft | not) | select(any(.assets[]; .name | test("^moovidos_full_.*\\.apk$")))][0].tag_name')
+            [ -n "$TAG" ] && [ "$TAG" != "null" ] || { echo "::error::no release with a full APK"; exit 1; }
+            gh release download "$TAG" --repo moovitdos/moovidos --pattern 'moovidos_full_*.apk'
+            echo "APK_LABEL=מובידוס $TAG" >> "$GITHUB_ENV"
+            ;;
+          url)
+            [ -n "$APK_URL" ] || { echo "::error::apk_url is empty"; exit 1; }
+            curl -fL --retry 3 -o app.apk "$APK_URL"
+            echo "APK_LABEL=$APK_URL" >> "$GITHUB_ENV"
+            ;;
+          none)
+            echo "APK_LABEL=בלי התקנה" >> "$GITHUB_ENV"
+            ;;
+          *) echo "::error::unknown apk source: $APK_SOURCE"; exit 1 ;;
+        esac
+        ls -la
+
+    - name: Start Android
+      env:
+        VNC_PASSWORD: ${{ secrets.EMULATOR_PASSWORD || steps.pw.outputs.pw }}
+        # אופציונלי: מזהה-אנדרואיד משלך (16 תווי hex); בלעדיו — הקבוע שבסקריפט
+        ANDROID_ID: ${{ secrets.EMULATOR_ANDROID_ID || '4d6f6f7669646f73' }}
+      run: |
+        S="${SCREEN_CHOICE%% *}"
+        D=$(echo "$SCREEN_CHOICE" | grep -oE '[0-9]+dpi' | grep -oE '[0-9]+')
+        SCREEN="$S" DENSITY="$D" WORK="$RUNNER_TEMP/emu" bash start_web_emulator.sh
+
+    - name: Install and open the app
+      if: env.APK_SOURCE != 'none'
+      run: |
+        ADB="$ANDROID_SDK_ROOT/platform-tools/adb"
+        APK=$(ls "$RUNNER_TEMP"/apk/*.apk | head -1)
+        AAPT=$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt | sort -V | tail -1)
+        PKG=$("$AAPT" dump badging "$APK" | sed -nE "s/^package: name='([^']+)'.*/\1/p")
+        echo "installing $APK ($PKG)"
+        "$ADB" -e install -r "$APK"
+        "$ADB" -e shell monkey -p "$PKG" -c android.intent.category.LAUNCHER 1 >/dev/null
+        echo "הותקן: $APK_LABEL" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Keep the emulator open
+      env:
+        FROM_SECRET: ${{ steps.pw.outputs.from_secret }}
+        PW: ${{ steps.pw.outputs.pw }}
+      run: |
+        M=$(echo "$MINUTES" | tr -cd '0-9'); M=${M:-60}
+        [ "$M" -lt 5 ] && M=5; [ "$M" -gt 340 ] && M=340
+        END=$(( $(date +%s) + M * 60 ))
+        echo "פתוח עד $(TZ=Asia/Jerusalem date -d @$END +%H:%M) (שעון ישראל). לעצירה מוקדמת: Cancel workflow."
+        while [ "$(date +%s)" -lt "$END" ]; do
+          sleep 60
+          kill -0 "$(cat "$RUNNER_TEMP/emu/emulator.pid")" 2>/dev/null || { echo "::error::the emulator stopped"; tail -30 "$RUNNER_TEMP/emu/emulator.log"; exit 1; }
+          # מנהרה שנפלה — פותחים חדשה ומדפיסים את הקישור החדש.
+          if ! pgrep -f "cloudflared tunnel" >/dev/null; then
+            nohup "$RUNNER_TEMP/cloudflared" tunnel --no-autoupdate --url http://localhost:6080 > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+            sleep 15
+            URL=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -1 || true)
+            if [ "$FROM_SECRET" = "1" ]; then echo "::warning title=קישור חדש לאמולטור::$URL/"; else echo "::warning title=קישור חדש לאמולטור::$URL/#pw=$PW"; fi
+          fi
+          echo "נותרו $(( (END - $(date +%s)) / 60 )) דקות"
+        done
