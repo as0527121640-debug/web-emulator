@@ -58,7 +58,9 @@ jobs:
     - name: Install the screen-sharing tools
       run: |
         sudo apt-get update -qq
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb x11vnc novnc websockify x11-utils xdotool >/dev/null
+        # הספריות שהאמולטור מקושר אליהן (ldd על qemu ועל ספריות Qt שלו) — חלקן לא מותקנות בשרת של GitHub
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xvfb x11vnc novnc websockify x11-utils xdotool \
+          libpulse0 libnss3 libnspr4 libxkbfile1 libxi6 libx11-xcb1 libsm6 libice6 libdrm2 libdbus-1-3 libsndfile1 >/dev/null
         curl -fsSL -o "$RUNNER_TEMP/cloudflared" https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
         chmod +x "$RUNNER_TEMP/cloudflared"
 
