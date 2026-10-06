@@ -179,7 +179,7 @@ jobs:
         mkdir -p "$RUNNER_TEMP/shot"
         "$ANDROID_SDK_ROOT/platform-tools/adb" -e emu screenrecord screenshot "$RUNNER_TEMP/shot" >/dev/null 2>&1 || true
         sleep 3
-        ls "$RUNNER_TEMP/shot
+        ls "$RUNNER_TEMP/shot" || true
     - uses: actions/upload-artifact@v4
       with:
         name: screenshot
