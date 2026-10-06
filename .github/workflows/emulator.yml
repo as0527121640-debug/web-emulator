@@ -176,11 +176,14 @@ jobs:
     - name: Screenshot
       run: |
         sleep 20
-        import -display :1 -window root "$RUNNER_TEMP/screen.png" || xwd -display :1 -root -silent > "$RUNNER_TEMP/screen.xwd" || true
+        mkdir -p "$RUNNER_TEMP/shot"
+        "$ANDROID_SDK_ROOT/platform-tools/adb" -e emu screenrecord screenshot "$RUNNER_TEMP/shot" >/dev/null 2>&1 || true
+        sleep 3
+        ls "$RUNNER_TEMP/shot
     - uses: actions/upload-artifact@v4
       with:
         name: screenshot
-        path: ${{ runner.temp }}/screen.*
+        path: ${{ runner.temp }}/shot/
         retention-days: 3
         if-no-files-found: ignore
 
